@@ -142,3 +142,93 @@ Sim_palletrone/
 		├── PROP.stl
 		├── scene.xml
 		└── STLchanger.py
+
+---
+
+## Arm-Mounted Simulation
+
+### Requirements
+
+```bash
+pip install mujoco numpy matplotlib
+```
+
+### 1. Build The Model
+
+```bash
+python3 build_arm_drone.py \
+  --drone src/plant/xml/Palletrone.xml \
+  --arm ~/cone_harvester_sim_ws/src/cone_harvester_sim/models/Forest_Cone_Harvesting_Robot.xml \
+  --rigid --j1 90 --a -0.16 \
+  --base-mass 3.3 --arm-len 0.23 \
+  --cw-mass 0.610 --cw-pos -0.251 --cw-z 0.165 \
+  --top-height 0.404 \
+  --out src/plant/xml/model_a16.xml
+```
+
+| 옵션 | 의미 | 기본값 |
+| --- | --- | --- |
+| `--drone` | Palletrone.xml 경로 | (필수) |
+| `--arm` | 로봇팔 XML 경로 | (필수) |
+| `--a` | 팔 장착점 x 오프셋 [m] | -0.014 |
+| `--j1` ~ `--j4` | 팔 관절 각도 [deg] | 90 / 0 / 0 / 0 |
+| `--rigid` | 관절을 지정 자세로 굳혀 강체화 | off |
+| `--mount-z` | 팔 장착 높이 [m] | -0.125 |
+| `--base-mass` | 드론 본체 질량 [kg] | 3.3 |
+| `--arm-len` | 원점→프로펠러 암 길이 [m] | 0.23 |
+| `--cw-mass` | 변압기 질량 [kg] | 0.610 |
+| `--cw-pos` | 변압기 x 위치 [m] | -0.251 |
+| `--cw-z` | 변압기 z 위치 [m] | 0.165 |
+| `--top-height` | 지면~드론 윗면 [m] (다리 길이 자동 계산) | 0.404 |
+| `--gear-span` | 다리 배치 반경 [m] | 0.25 |
+| `--kp` | 팔 관절 위치 게인 (`--rigid` 아닐 때) | 80 |
+| `--out` | 출력 XML 경로 | Palletrone_with_arm.xml |
+
+모델 확인:
+
+```bash
+cd src/plant/xml && python3 -m mujoco.viewer --mjcf=model_a16.xml && cd -
+```
+
+### 2. Interactive Flight
+
+```bash
+python3 fly_sim.py --model src/plant/xml/model_a16.xml
+```
+
+| 옵션 | 의미 | 기본값 |
+| --- | --- | --- |
+| `--model` | 미리 만들어둔 XML 경로 | — |
+| `--xml` | Palletrone.xml (모델 즉석 생성 시) | — |
+| `--alt` | 호버 고도 [m] | 1.0 |
+| `--ramp` | 이착륙 램프 시간 [s] | 4.0 |
+| `--kf` | DoB 힘 게인 | 5.0 |
+| `--km` | DoB 모멘트 게인 | 10.0 |
+| `--no-viewer` | 창 없이 계산만 | off |
+| `--script` | `"시각:명령;..."` 자동 실행 | — |
+
+터미널 명령어:
+
+| 명령 | 동작 |
+| --- | --- |
+| `takeoff` / `t` | 이륙 → 호버 유지 |
+| `dob on` / `dob off` | 외란 관측기 켜기 / 끄기 |
+| `dist X Y Z` | 외란 힘 인가 [N], world frame |
+| `dist off` | 외란 해제 |
+| `moment X Y Z` | 외란 모멘트 인가 [Nm], body frame |
+| `goto X Y Z` | 목표 위치 이동 [m] |
+| `status` / `s` | 현재 상태 출력 |
+| `log <파일>` | CSV 기록 시작 |
+| `land` / `l` | 착륙 → 종료 |
+| `quit` / `q` | 즉시 종료 |
+| `help` / `h` | 명령어 목록 |
+
+뷰어 단축키:
+
+| 키 | 동작 |
+| --- | --- |
+| `T` | 이륙 |
+| `D` | DoB 토글 |
+| `X` | 5 N 외란 토글 |
+| `L` | 착륙 |
+| `Q` | 종료 |
