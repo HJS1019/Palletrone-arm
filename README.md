@@ -153,7 +153,7 @@ Sim_palletrone/
 pip install mujoco numpy matplotlib
 ```
 
-### 1. Build The Model
+### 1. Build The Model (a 뒤의 숫자 수정 시 로봇팔의 위치 바뀜, 마지막줄 모델명도 맞춰서 수정 가능)
 
 ```bash
 python3 build_arm_drone.py \
