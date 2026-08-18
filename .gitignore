@@ -19,3 +19,11 @@ bags/
 .png
 # IDE 설정 파일 (VS Code 등)
 .vscode/
+
+# arm/DoB 시뮬레이션 생성물
+src/plant/xml/_*.xml
+src/plant/xml/Palletrone_with_arm.xml
+src/plant/xml/arm_meshes/
+runs2/
+figs_a/
+MUJOCO_LOG.TXT
