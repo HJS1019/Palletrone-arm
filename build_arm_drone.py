@@ -58,6 +58,12 @@ def main():
     p.add_argument("--j3", type=float, default=0.0)
     p.add_argument("--j4", type=float, default=0.0)
     p.add_argument("--kp", type=float, default=80.0, help="팔 관절 위치 게인")
+    p.add_argument("--joint-damping", type=float, default=2.0,
+                   help="팔 관절 damping (원본 0.3). 낮으면 진자 모드가 자세제어와 커플링됨")
+    p.add_argument("--j2-min", type=float, default=5.0,
+                   help="joint2 하한 [deg]. 팔꿈치 뒤집힘/완전신전(특이점) 방지")
+    p.add_argument("--joint-armature", type=float, default=0.02,
+                   help="팔 관절 armature (반사 관성)")
     p.add_argument("--top-height", type=float, default=0.404,
                    help="착륙 상태에서 지면~드론 윗면 높이 [m] (실측 0.404). "
                         "0 이면 다리를 만들지 않는다")
@@ -161,8 +167,8 @@ def main():
     else:
         for j in base_link.iter("joint"):
             j.set("name", "arm_" + j.get("name"))
-            j.set("damping", "0.3")
-            j.set("armature", "0.01")
+            j.set("damping", f"{args.joint_damping}")
+            j.set("armature", f"{args.joint_armature}")
     for s in base_link.iter("site"):
         s.set("name", "arm_" + s.get("name"))
 
@@ -218,6 +224,13 @@ def main():
 
     # ---------- 팔 관절 position 액추에이터 (자세 유지용) ----------
     act = root.find("actuator")
+    j2lo = math.radians(args.j2_min)
+    # 모델 자체의 joint2 range 도 올려둔다
+    for b in base_link.iter("body"):
+        for j in b.findall("joint"):
+            if j.get("name") in ("arm_joint2", "joint2") and j.get("range"):
+                r = [float(x) for x in j.get("range").split()]
+                j.set("range", f"{max(r[0], j2lo):.6f} {r[1]:.6f}")
     for jn, lim in ([] if args.rigid else [("arm_joint1", (0.0, 1.5708)), ("arm_joint2", (-1.5708, 1.5708)),
                     ("arm_joint3", (-1.5708, 1.5708)), ("arm_joint4", (-3.15, 3.15))]):
         e = ET.SubElement(act, "position")

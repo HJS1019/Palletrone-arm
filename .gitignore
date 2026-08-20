@@ -27,3 +27,15 @@ src/plant/xml/arm_meshes/
 runs2/
 figs_a/
 MUJOCO_LOG.TXT
+
+# arm/DoB 시뮬레이션 생성물
+src/plant/xml/_*.xml
+src/plant/xml/Palletrone_with_arm.xml
+src/plant/xml/Palletrone_arm_rigid.xml
+src/plant/xml/Palletrone_final.xml
+src/plant/xml/arm_movable.xml
+src/plant/xml/model_*.xml
+src/plant/xml/arm_meshes/
+runs2/
+figs_a/
+MUJOCO_LOG.TXT

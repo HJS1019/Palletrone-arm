@@ -11,6 +11,14 @@ Palletrone + 로봇팔 : 명령어로 조종하는 대화형 시뮬레이터
   dist off           외란 해제
   moment X Y Z       외란 모멘트 인가 [Nm], body frame
   goto X Y Z         목표 위치 이동 [m]
+  arm J1 J2 J3 J4    팔 관절 목표각 [deg]. 호버 중에만. 예:  arm 45 0 0 0
+  tcp X Y Z [T]      TCP 목표 위치 [m, 기체 body frame]. DLS-IK 로 풀어 quintic 궤적 생성
+                     예:  tcp 0.55 0 -0.15      (T 생략시 3초)
+  tcpnow             현재 TCP 위치 출력
+  hold               짐벌 ON — 지금 TCP 를 world 좌표에 고정하고 팔이 기체 움직임을 보상
+  hold off           짐벌 해제
+                     뷰어의 Control 패널 슬라이더로도 조작 가능 (호버 중에만 반영,
+                     이륙/착륙 중에는 자동으로 고정된다)
   status / s         현재 상태 한 줄 출력
   log <파일>          지금부터 CSV 기록 시작 (없으면 자동 이름)
   land / l           착륙 -> 접지 후 시뮬레이션 종료
@@ -364,6 +372,29 @@ class Sim:
         self.log_rows = []
         self.log_path = None
         self.quit = False
+        # 팔 관절: cmd = 현재 지령(레이트 제한 적용), target = 사용자가 준 목표
+        self.arm_target = None if self.arm_ctrl is None else self.arm_ctrl.copy()
+        self.arm_written = None      # 직전에 우리가 ctrl 에 쓴 값 (뷰어 조작 감지용)
+        self.arm_traj = None         # (t0, T, q_start, q_goal) quintic 궤적
+        self.hold_w = None           # world frame 에 고정할 TCP 위치 (짐벌 모드)
+        self.hold_warned = 0.0
+        self.pert = None             # 뷰어의 MjvPerturb (마우스 외란)
+        self.hold_bad_since = None   # 짐벌 오차가 기준을 넘기 시작한 시각
+        self.arm_qadr = []
+        if self.arm_ctrl is not None:
+            for i in range(self.n_drone_act, self.model.nu):
+                j = self.model.actuator_trnid[i, 0]
+                self.arm_qadr.append(self.model.jnt_qposadr[j])
+        self.ik_data = mujoco.MjData(self.model) if self.arm_qadr else None
+        self.tcp_sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, b"arm_tcp")
+        self.mount_b = None
+        self.reach_min = self.reach_max = None
+        if self.arm_qadr:
+            mb = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, b"arm_base_link")
+            self.mount_b = np.array(self.model.body_pos[mb])
+            self.reach_min, self.reach_max = self.compute_reach()
+            print(f"      팔 장착점 {np.round(self.mount_b,3)} m, "
+                  f"TCP 도달 반경 {self.reach_min:.3f} ~ {self.reach_max:.3f} m")
 
         print(f"\n기체  총질량 {self.m_total:.3f} kg   (모델에서 산출)")
         print(f"      암 길이 {args.arm_len*100:.1f} cm (r = {self.R:.5f} m)")
@@ -431,6 +462,7 @@ class Sim:
             elif c in ("land", "l"):
                 if self.mode in ("HOVER", "TAKEOFF"):
                     self.mode = "LAND"
+                    self.hold_w = None
                     self.dob_on = False
                     self.obs.reset()
                     self.dist_F[:] = 0.0
@@ -441,6 +473,72 @@ class Sim:
                     print(f"[{self.data.time:7.2f}] 착륙 시작")
                 else:
                     print("  비행 중이 아님")
+            elif c == "arm":
+                if self.arm_ctrl is None:
+                    print("  이 모델은 팔 관절이 고정됨 (--rigid 로 만든 모델)")
+                elif self.mode != "HOVER":
+                    print("  호버 상태에서만 팔을 움직일 수 있음")
+                else:
+                    v = [float(x) for x in p[1:1 + len(self.arm_ctrl)]]
+                    v = v + list(np.degrees(self.arm_target[len(v):]))
+                    lo = np.array(self.model.actuator_ctrlrange[self.n_drone_act:, 0])
+                    hi = np.array(self.model.actuator_ctrlrange[self.n_drone_act:, 1])
+                    lo[1] = max(lo[1], math.radians(self.args.elbow_min))
+                    self.arm_target = np.clip(np.radians(v), lo, hi)
+                    print(f"[{self.data.time:7.2f}] 팔 목표 "
+                          f"{np.round(np.degrees(self.arm_target), 1)} deg "
+                          f"(최대 {self.args.arm_rate:.0f} deg/s)")
+            elif c == "tcp":
+                if self.arm_ctrl is None:
+                    print("  이 모델은 팔 관절이 고정됨 (--rigid)")
+                elif self.mode != "HOVER":
+                    print("  호버 상태에서만 사용 가능")
+                else:
+                    goal = np.array([float(x) for x in p[1:4]])
+                    T = float(p[4]) if len(p) > 4 else self.args.ik_duration
+                    q_goal, err = self.solve_ik(goal, self.args.ik_lambda,
+                                                self.args.ik_max_qdot)
+                    q_now = np.array([self.data.qpos[a] for a in self.arm_qadr])
+                    self.arm_traj = (self.data.time, T, q_now, q_goal)
+                    self.arm_target = q_goal.copy()
+                    reach = self.tcp_body(q_goal)
+                    print(f"[{self.data.time:7.2f}] TCP 목표 {np.round(goal,3)} m (body frame)")
+                    print(f"          IK 해 {np.round(np.degrees(q_goal),1)} deg, "
+                          f"도달점 {np.round(reach,3)}, 오차 {err*1000:.1f} mm, {T:.1f}s 궤적")
+                    if err > 0.01:
+                        print("          !! 도달 불가 (최소자승 근사해)")
+            elif c == "hold":
+                if self.arm_ctrl is None:
+                    print("  이 모델은 팔 관절이 고정됨 (--rigid)")
+                elif len(p) > 1 and p[1].lower() in ("off", "0", "stop"):
+                    self.hold_w = None
+                    self.arm_target = self.arm_ctrl.copy()
+                    print(f"[{self.data.time:7.2f}] 짐벌 해제")
+                elif self.mode != "HOVER":
+                    print("  호버 상태에서만 사용 가능")
+                else:
+                    # 팔꿈치가 하한 아래면 먼저 올려놓는다 (뒤집힘 방지)
+                    lo_j, _ = self.arm_limits(3)
+                    if self.arm_ctrl[1] < lo_j[1]:
+                        print(f"          joint2 {math.degrees(self.arm_ctrl[1]):.1f} deg "
+                              f"-> {self.args.elbow_min:.1f} deg 로 보정 (팔꿈치 방향 고정)")
+                        self.arm_ctrl[1] = lo_j[1]
+                        self.arm_target[1] = lo_j[1]
+                    self.hold_w = self.tcp_world()
+                    self.hold_bad_since = None
+                    self.arm_traj = None
+                    sv = self.ik_sigma_min()
+                    print(f"[{self.data.time:7.2f}] 짐벌 ON — TCP 를 world "
+                          f"{np.round(self.hold_w,4)} 에 고정")
+                    print(f"          현재 자코비안 sigma_min = {sv:.4f} m/rad", end="")
+                    if sv < 0.03:
+                        print("   !! 특이점 근처. 팔을 굽히세요 (예: arm 45 50 0 0)")
+                    else:
+                        print(f"   (관절 1 deg/s 당 TCP {sv*math.pi/180*1000:.2f} mm/s)")
+            elif c == "tcpnow":
+                if self.arm_qadr:
+                    print(f"[{self.data.time:7.2f}] TCP (body) = "
+                          f"{np.round(self.tcp_body(), 4)} m")
             elif c in ("status", "s"):
                 self.status()
             elif c == "log":
@@ -465,7 +563,11 @@ class Sim:
               f"rpy=[{rpy[0]:+.1f} {rpy[1]:+.1f} {rpy[2]:+.1f}] "
               f"F=[{F[0]:5.2f} {F[1]:5.2f} {F[2]:5.2f} {F[3]:5.2f}] "
               f"dist={self.dist_F} F_hat=[{self.obs.F_hat[0]:+.2f} "
-              f"{self.obs.F_hat[1]:+.2f} {self.obs.F_hat[2]:+.2f}]")
+              f"{self.obs.F_hat[1]:+.2f} {self.obs.F_hat[2]:+.2f}]"
+              + (f" arm={np.round(np.degrees([self.data.qpos[a] for a in self.arm_qadr]),1)}"
+                 f" x_c={self.x_c:+.4f}" if self.arm_qadr else "")
+              + (f" hold_err={np.linalg.norm(self.tcp_world()-self.hold_w)*1000:.1f}mm"
+                 if self.hold_w is not None else ""))
 
     # ---------------- 한 스텝
     def step(self):
@@ -490,6 +592,13 @@ class Sim:
         else:
             z_ref = self.args.alt if self.mode == "HOVER" else self.ground_z
         ref = np.array([self.target[0], self.target[1], z_ref])
+
+        # 무게중심 추종 (팔이 움직이면 CoM 이 실시간으로 변한다)
+        if self.args.pc_track and self.arm_ctrl is not None:
+            cw = np.array(self.data.subtree_com[self.bid]) - np.array(self.data.xpos[self.bid])
+            self.com_b = Rwb.T @ cw
+            self.x_c = float(self.com_b[0])
+            self.alloc.Pc = np.array([self.com_b[0], self.com_b[1], 0.0])
 
         # 관측기
         F_act_b, M_act_b = self.applied_wrench()
@@ -523,17 +632,206 @@ class Sim:
         self.data.xfrc_applied[self.bid, 3:6] = Rwb @ self.dist_M
 
         n = self.n_drone_act
+        if self.arm_ctrl is not None and self.arm_target is not None:
+            # 뷰어 Control 슬라이더로 값이 바뀌었는지 확인
+            cur = np.array(self.data.ctrl[n:])
+            if self.arm_written is not None and not np.allclose(cur, self.arm_written, atol=1e-9):
+                if self.mode == "HOVER":
+                    lo_a = np.array(self.model.actuator_ctrlrange[n:, 0])
+                    hi_a = np.array(self.model.actuator_ctrlrange[n:, 1])
+                    lo_a[1] = max(lo_a[1], math.radians(self.args.elbow_min))
+                    self.arm_target = np.clip(cur, lo_a, hi_a)
+                    self.arm_traj = None
+                # 호버가 아니면 무시 -> 아래에서 원래 값으로 덮어써 고정 유지
+            if self.hold_w is not None and self.mode == "HOVER":
+                # 오차는 '실측 TCP' 로, 적분은 '지령각' 으로 한다.
+                # (실측각으로 적분하면 서보 처짐이 되먹여져 팔이 서서히 무너진다)
+                goal_b_raw = Rwb.T @ (self.hold_w - pos)
+                goal_b, sat = self.clamp_reach(goal_b_raw)
+                e = goal_b - Rwb.T @ (self.tcp_world() - pos)
+                q_act = np.array([self.data.qpos[a] for a in self.arm_qadr])
+                jids = [self.model.actuator_trnid[self.n_drone_act + i, 0] for i in range(3)]
+                lo_j, hi_j = self.arm_limits(3)
+                self.tcp_body(q_act)                       # ik_data 를 실측 자세로 갱신
+                jacp = np.zeros((3, self.model.nv))
+                mujoco.mj_jacSite(self.model, self.ik_data, jacp, None, self.tcp_sid)
+                J = jacp[:, [self.model.jnt_dofadr[j] for j in jids]]
+                lam = self.args.ik_lambda
+                v_des = self.args.hold_gain * e            # [m/s]
+                qdot = J.T @ np.linalg.solve(J @ J.T + lam ** 2 * np.eye(3), v_des)
+                rate = math.radians(self.args.hold_rate)
+                qdot = np.clip(qdot, -rate, rate)
+                self.arm_ctrl[:3] = np.clip(self.arm_ctrl[:3] + qdot * dt, lo_j, hi_j)
+                self.arm_target[:3] = self.arm_ctrl[:3]
+                # --- 안전장치: 실제 오차(클램프 전 목표 기준) 감시 ---
+                err_true = float(np.linalg.norm(
+                    goal_b_raw - Rwb.T @ (self.tcp_world() - pos)))
+                if err_true > self.args.hold_tol:
+                    if self.hold_bad_since is None:
+                        self.hold_bad_since = self.data.time
+                    held = self.data.time - self.hold_bad_since
+                    if self.data.time - self.hold_warned > 3.0:
+                        self.hold_warned = self.data.time
+                        print(f"[{self.data.time:7.2f}] 짐벌 오차 {err_true*1000:.0f} mm "
+                              f"({held:.1f}/{self.args.hold_timeout:.0f} s"
+                              f"{', 도달한계 포화' if sat else ''})")
+                    if held >= self.args.hold_timeout:
+                        self.hold_w = None
+                        self.hold_bad_since = None
+                        self.arm_target = self.arm_ctrl.copy()
+                        print(f"[{self.data.time:7.2f}] ** 짐벌 자동 해제 ** "
+                              f"오차 {err_true*1000:.0f} mm 가 "
+                              f"{self.args.hold_timeout:.0f} 초 이상 지속됨")
+                else:
+                    self.hold_bad_since = None
+            elif self.arm_traj is not None:
+                t0, T, q0, q1 = self.arm_traj
+                u = min(1.0, max(0.0, (self.data.time - t0) / T))
+                sca = 10 * u ** 3 - 15 * u ** 4 + 6 * u ** 5      # quintic
+                self.arm_ctrl = q0 + (q1 - q0) * sca
+                if u >= 1.0:
+                    self.arm_traj = None
+            else:
+                step = math.radians(self.args.arm_rate) * dt
+                e = self.arm_target - self.arm_ctrl
+                self.arm_ctrl += np.clip(e, -step, step)
+
         cmd = np.clip(np.concatenate([self.T_cmd, self.th_cmd]), self.lo[:n], self.hi[:n])
         self.data.ctrl[:n] = cmd
         if self.arm_ctrl is not None:
             self.data.ctrl[n:] = self.arm_ctrl
+            self.arm_written = self.arm_ctrl.copy()
         mujoco.mj_step(self.model, self.data)
 
         if self.log_path is not None:
+            arm_q = [math.degrees(self.data.qpos[a]) for a in self.arm_qadr] \
+                if self.arm_qadr else [0.0, 0.0, 0.0, 0.0]
             self.log_rows.append([t, *pos, *np.degrees(rpy),
                                   *self.data.actuator_force[0:4], *np.degrees(srv),
                                   *F_hat, *M_hat, *self.dist_F,
-                                  1.0 if self.dob_on else 0.0])
+                                  1.0 if self.dob_on else 0.0,
+                                  *arm_q, self.x_c])
+
+    def tcp_body(self, q=None):
+        """현재(또는 주어진) 관절각에서 TCP 위치를 base body frame 으로 반환."""
+        d = self.ik_data
+        d.qpos[:] = 0.0
+        d.qpos[3] = 1.0                       # base 를 원점/무회전에 둔다 -> world = body
+        if q is None:
+            q = [self.data.qpos[a] for a in self.arm_qadr]
+        for a, v in zip(self.arm_qadr, q):
+            d.qpos[a] = v
+        mujoco.mj_forward(self.model, d)
+        return np.array(d.site_xpos[self.tcp_sid])
+
+    def compute_reach(self, ns=13):
+        """장착점에서 TCP 까지 도달 가능한 반경 [최소, 최대]."""
+        lo, hi = self.arm_limits(3)
+        R = []
+        for a in np.linspace(lo[0], hi[0], ns):
+            for b in np.linspace(lo[1], hi[1], ns):
+                for c in np.linspace(lo[2], hi[2], 7):
+                    R.append(np.linalg.norm(self.tcp_body([a, b, c]) - self.mount_b))
+        return float(np.min(R)), float(np.max(R))
+
+    def clamp_reach(self, goal_b, margin=0.02):
+        """목표 TCP 를 도달 가능한 껍질 안으로 투영. 관절 한계에 박히는 것을 예방."""
+        v = goal_b - self.mount_b
+        r = float(np.linalg.norm(v))
+        lo = self.reach_min + margin
+        hi = self.reach_max - margin
+        if r < 1e-9:
+            return goal_b, False
+        if r > hi:
+            return self.mount_b + v / r * hi, True
+        if r < lo:
+            return self.mount_b + v / r * lo, True
+        return goal_b, False
+
+    def arm_limits(self, k=3):
+        """팔 관절 [하한, 상한]. joint2 는 elbow_min 으로 하한을 올려
+        팔꿈치 뒤집힘과 완전 신전(특이점)을 동시에 막는다."""
+        jids = [self.model.actuator_trnid[self.n_drone_act + i, 0] for i in range(k)]
+        lo = np.array([self.model.jnt_range[j][0] if self.model.jnt_limited[j] else -np.pi
+                       for j in jids])
+        hi = np.array([self.model.jnt_range[j][1] if self.model.jnt_limited[j] else np.pi
+                       for j in jids])
+        if k >= 2:
+            lo[1] = max(lo[1], math.radians(self.args.elbow_min))
+        return lo, hi
+
+    def tcp_world(self):
+        """실제 시뮬레이션 상태에서의 TCP world 좌표."""
+        return np.array(self.data.site_xpos[self.tcp_sid])
+
+    def ik_sigma_min(self, q=None):
+        """TCP 위치 자코비안(팔 3관절)의 최소 특이값 [m/rad]."""
+        d = self.ik_data
+        d.qpos[:] = 0.0
+        d.qpos[3] = 1.0
+        q = q if q is not None else [self.data.qpos[a] for a in self.arm_qadr]
+        for a, v in zip(self.arm_qadr, q):
+            d.qpos[a] = v
+        mujoco.mj_forward(self.model, d)
+        jacp = np.zeros((3, self.model.nv))
+        mujoco.mj_jacSite(self.model, d, jacp, None, self.tcp_sid)
+        jids = [self.model.actuator_trnid[self.n_drone_act + i, 0] for i in range(3)]
+        J = jacp[:, [self.model.jnt_dofadr[j] for j in jids]]
+        return float(np.linalg.svd(J, compute_uv=False).min())
+
+    def solve_ik(self, goal_b, lam=0.05, max_dq=0.5, iters=400, tol=1e-4):
+        """위치 전용 DLS-IK.  dq = J^T (JJ^T + lam^2 I)^-1 * e   (레포와 동일 형태)
+        오차가 줄어들 때만 스텝을 받아들이는 backtracking 을 추가했다.
+        반환: (관절각 배열, 최종 오차 [m])"""
+        d = self.ik_data
+        n = len(self.arm_qadr)
+        jids = [self.model.actuator_trnid[self.n_drone_act + i, 0] for i in range(n)]
+        lo, hi = self.arm_limits(n)
+        cols = [self.model.jnt_dofadr[j] for j in jids]
+        jacp = np.zeros((3, self.model.nv))
+
+        def fk_err(q):
+            d.qpos[:] = 0.0
+            d.qpos[3] = 1.0
+            for a, v in zip(self.arm_qadr, q):
+                d.qpos[a] = v
+            mujoco.mj_forward(self.model, d)
+            e = goal_b - np.array(d.site_xpos[self.tcp_sid])
+            return e, float(np.linalg.norm(e))
+
+        # 시작점 여러 개에서 풀고 가장 좋은 해를 고른다 (지역해 회피)
+        q_now = np.array([self.data.qpos[a] for a in self.arm_qadr])
+        starts = [q_now, np.clip(np.zeros(n), lo, hi),
+                  np.clip((lo + hi) / 2.0, lo, hi),
+                  np.clip(q_now + np.array([0.0, 0.6, 0.0, 0.0][:n]), lo, hi)]
+        best_q, best_e = q_now.copy(), fk_err(q_now)[1]
+
+        for q0 in starts:
+            q = np.clip(np.array(q0, dtype=float), lo, hi)
+            e, err = fk_err(q)
+            for _ in range(iters):
+                if err < tol:
+                    break
+                mujoco.mj_jacSite(self.model, d, jacp, None, self.tcp_sid)
+                J = jacp[:, cols]
+                dq = J.T @ np.linalg.solve(J @ J.T + lam ** 2 * np.eye(3), e)
+                dq = np.clip(dq, -max_dq, max_dq)
+                step = 1.0
+                improved = False
+                for _ in range(12):                  # backtracking
+                    q_try = np.clip(q + dq * step, lo, hi)
+                    e_try, err_try = fk_err(q_try)
+                    if err_try < err:
+                        q, e, err = q_try, e_try, err_try
+                        improved = True
+                        break
+                    step *= 0.5
+                if not improved:
+                    break
+            if err < best_e:
+                best_q, best_e = q.copy(), err
+        fk_err(best_q)
+        return best_q, best_e
 
     def applied_wrench(self):
         F, M = np.zeros(3), np.zeros(3)
@@ -555,7 +853,8 @@ class Sim:
             hdr = ("t,x,y,z,roll_deg,pitch_deg,yaw_deg,F1,F2,F3,F4,"
                    "servo1,servo2,servo3,servo4,"
                    "Fhat_x,Fhat_y,Fhat_z,Mhat_x,Mhat_y,Mhat_z,"
-                   "dist_x,dist_y,dist_z,dob_on")
+                   "dist_x,dist_y,dist_z,dob_on,"
+                   "arm_j1,arm_j2,arm_j3,arm_j4,x_c")
             np.savetxt(self.log_path, np.array(self.log_rows), delimiter=",",
                        header=hdr, comments="", fmt="%.6f")
             print(f"[저장] {self.log_path}  ({len(self.log_rows)} rows)")
@@ -587,6 +886,23 @@ def main():
     p.add_argument("--km", type=float, default=10.0, help="DoB 모멘트 게인")
     p.add_argument("--fix-mz", action="store_true",
                    help="allocator calc_A1 의 Mz 행에 틸트 유발 요모멘트 항 추가")
+    p.add_argument("--arm-rate", type=float, default=30.0,
+                   help="팔 관절 최대 각속도 [deg/s]")
+    p.add_argument("--ik-duration", type=float, default=3.0, help="IK 궤적 시간 [s]")
+    p.add_argument("--ik-lambda", type=float, default=0.05, help="DLS 감쇠계수")
+    p.add_argument("--ik-max-qdot", type=float, default=0.5, help="IK 반복당 관절속도 클램프")
+    p.add_argument("--elbow-min", type=float, default=1.0,
+                   help="joint2 하한 [deg]. 팔꿈치 뒤집힘과 완전 신전(특이점)을 막는다")
+    p.add_argument("--hold-tol", type=float, default=0.05,
+                   help="짐벌 허용 오차 [m]. 이를 넘는 상태가 지속되면 자동 해제")
+    p.add_argument("--hold-timeout", type=float, default=10.0,
+                   help="짐벌 자동 해제까지의 지속 시간 [s]. 0 이면 해제하지 않음")
+    p.add_argument("--hold-gain", type=float, default=6.0,
+                   help="짐벌 보상 게인 [1/s]. v_des = K * (TCP 오차)")
+    p.add_argument("--hold-rate", type=float, default=180.0,
+                   help="짐벌 모드 관절 최대 각속도 [deg/s]")
+    p.add_argument("--pc-track", action="store_true",
+                   help="allocator 의 Pc_ 를 실제 CoM 으로 매 스텝 갱신")
     p.add_argument("--no-viewer", action="store_true")
     p.add_argument("--script", type=str, default=None,
                    help="'8:takeoff;20:dob on;30:dist 15 0 0;50:land' 형태로 자동 실행")
@@ -627,6 +943,9 @@ def main():
         else:
             from mujoco import viewer as mjv
             with mjv.launch_passive(sim.model, sim.data, key_callback=key_cb) as v:
+                sim.pert = v.perturb
+                print("  [뷰어] 기체를 더블클릭해 선택한 뒤 "
+                      "Ctrl+우드래그 = 힘, Ctrl+좌드래그 = 토크")
                 t0 = time.perf_counter()
                 n = 0
                 while v.is_running() and not sim.quit and sim.mode != "DONE":
