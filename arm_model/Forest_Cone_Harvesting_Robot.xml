@@ -1,0 +1,91 @@
+<mujoco model="Forest_Cone_Harvesting_Robot_scene">
+  <compiler angle="radian" meshdir="meshes" autolimits="true"/>
+  <option integrator="implicitfast"/>
+  <statistic center="0 0 1.0" extent="1.0"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="130" elevation="-20"/>
+  </visual>
+
+  <default>
+    <joint damping="0.3" armature="0.01"/>
+    <default class="visual">
+      <geom type="mesh" group="2" contype="0" conaffinity="0" rgba="0.75294 0.75294 0.75294 1"/>
+    </default>
+    <default class="collision">
+      <geom group="3"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.15 0.2" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <mesh name="base_link" file="base_link.STL" scale="0.001 0.001 0.001"/>
+    <mesh name="link1" file="link1.STL" scale="0.001 0.001 0.001"/>
+    <mesh name="link2" file="link2.STL" scale="0.001 0.001 0.001"/>
+    <mesh name="link3" file="link3.STL" scale="0.001 0.001 0.001"/>
+    <mesh name="link4" file="link4.STL" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 3.0" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"/>
+    <!-- URDF "world" = worldbody. 게이트리는 z=1.2 공중에 위치 -->
+    <body name="carriage_x" pos="0 0 1.2">
+      <joint name="joint_x" type="slide" axis="1 0 0" range="-0.5 0.5"/>
+      <inertial pos="0 0 0" mass="0.1" fullinertia="0.0001 0.0001 0.0001 0 0 0"/>
+      <body name="carriage_y" pos="0 0 0">
+        <joint name="joint_y" type="slide" axis="0 1 0" range="-0.5 0.5"/>
+        <inertial pos="0 0 0" mass="0.1" fullinertia="0.0001 0.0001 0.0001 0 0 0"/>
+        <body name="base_link" pos="0 0 0" quat="1.794896515e-09 1 0 0">
+          <inertial pos="-0.01024 0 0.02917" mass="0.205" fullinertia="0.00027 0.00033 0.00013 0 6e-05 0"/>
+          <geom class="visual" mesh="base_link"/>
+          <geom class="collision" type="mesh" mesh="base_link"/>
+          <body name="link1" pos="0 0 0.04475" quat="0.4999981634 -0.5 -0.5 -0.5000018366">
+            <joint name="joint1" type="hinge" axis="0 0 1" range="0 1.5708"/>
+            <inertial pos="0.23315 0 0.0003" mass="0.394" fullinertia="0.00011 0.02625 0.02621 0 -4e-05 0"/>
+            <geom class="visual" mesh="link1"/>
+            <geom class="collision" type="mesh" mesh="link1"/>
+            <body name="link2" pos="0.333 0 0">
+              <joint name="joint2" type="hinge" axis="0 0 1" range="-1.5708 1.5708"/>
+              <inertial pos="0.06362 0.00046 0" mass="0.205" fullinertia="6e-05 0.00095 0.00096 -1e-05 0 0"/>
+              <geom class="visual" mesh="link2"/>
+              <geom class="collision" type="mesh" mesh="link2"/>
+              <body name="link3" pos="0.0835 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                <joint name="joint3" type="hinge" axis="0 0 1" range="-1.5708 1.5708"/>
+                <inertial pos="0.06268 0.01244 0" mass="0.304" fullinertia="0.00017 0.00142 0.00151 -0.00022 0 0"/>
+                <geom class="visual" mesh="link3"/>
+                <geom class="collision" type="mesh" mesh="link3"/>
+                <body name="link4" pos="0.081 0 0" quat="0.4999981634 -0.5 0.5000018366 -0.5">
+                  <joint name="joint4" type="hinge" axis="0 0 1" limited="false"/>
+                  <inertial pos="-0.00062 -0.04272 0.11889" mass="0.856" fullinertia="0.02161 0.01623 0.00887 0 3e-05 0.00284"/>
+                  <geom class="visual" mesh="link4"/>
+                  <geom class="collision" type="mesh" mesh="link4"/>
+                  <body name="tcp" pos="0 0 0.25">
+                    <site name="tcp" size="0.012" rgba="1 0 0 1"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="act_joint_x" joint="joint_x"/>
+    <motor name="act_joint_y" joint="joint_y"/>
+    <motor name="act_joint1" joint="joint1"/>
+    <motor name="act_joint2" joint="joint2"/>
+    <motor name="act_joint3" joint="joint3"/>
+    <motor name="act_joint4" joint="joint4"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home" qpos="0 0 0 0 0 0" ctrl="0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>
