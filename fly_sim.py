@@ -17,6 +17,9 @@ Palletrone + 로봇팔 : 명령어로 조종하는 대화형 시뮬레이터
   tcpnow             현재 TCP 위치 출력
   hold               짐벌 ON — 지금 TCP 를 world 좌표에 고정하고 팔이 기체 움직임을 보상
   hold off           짐벌 해제
+  orbit R T [평면]   기체를 원운동시킨다. R=반지름[m], T=주기[s], 평면=xy|xz|yz
+                     예:  orbit 0.10 20 xy      (반지름 10cm, 20초 주기)
+  orbit off          원운동 정지
                      뷰어의 Control 패널 슬라이더로도 조작 가능 (호버 중에만 반영,
                      이륙/착륙 중에는 자동으로 고정된다)
   status / s         현재 상태 한 줄 출력
@@ -380,6 +383,7 @@ class Sim:
         self.hold_warned = 0.0
         self.pert = None             # 뷰어의 MjvPerturb (마우스 외란)
         self.hold_bad_since = None   # 짐벌 오차가 기준을 넘기 시작한 시각
+        self.orbit = None            # (t0, R, T, plane, center) 기체 원운동
         self.arm_qadr = []
         if self.arm_ctrl is not None:
             for i in range(self.n_drone_act, self.model.nu):
@@ -462,11 +466,12 @@ class Sim:
             elif c in ("land", "l"):
                 if self.mode in ("HOVER", "TAKEOFF"):
                     self.mode = "LAND"
+                    self.orbit = None
                     self.hold_w = None
-                    self.dob_on = False
-                    self.obs.reset()
                     self.dist_F[:] = 0.0
                     self.dist_M[:] = 0.0
+                    # DoB 는 접지 직전까지 유지한다. 여기서 끄면 팔 이동으로 생긴
+                    # CoM 불일치 보상이 갑자기 사라져 기체가 크게 기운다.
                     self.ramp_from = self.data.sensordata[self.adr[self.ip] + 2]
                     self.ramp_to = self.ground_z - 0.02
                     self.ramp_t0 = self.data.time
@@ -539,6 +544,23 @@ class Sim:
                 if self.arm_qadr:
                     print(f"[{self.data.time:7.2f}] TCP (body) = "
                           f"{np.round(self.tcp_body(), 4)} m")
+            elif c == "orbit":
+                if len(p) > 1 and p[1].lower() in ("off", "0", "stop"):
+                    self.orbit = None
+                    print(f"[{self.data.time:7.2f}] 원운동 정지")
+                elif self.mode != "HOVER":
+                    print("  호버 상태에서만 사용 가능")
+                else:
+                    R = float(p[1]) if len(p) > 1 else 0.10
+                    T = float(p[2]) if len(p) > 2 else 20.0
+                    pl = p[3].lower() if len(p) > 3 else "xy"
+                    pos0 = self.get(self.ip).copy()
+                    self.orbit = (self.data.time, R, T, pl, pos0)
+                    v = 2 * math.pi * R / T
+                    print(f"[{self.data.time:7.2f}] 원운동 시작 — 반지름 {R*100:.0f} cm, "
+                          f"주기 {T:.1f} s, 평면 {pl}")
+                    print(f"          접선속도 {v:.3f} m/s ({1/T:.3f} Hz)"
+                          + (f", 짐벌 ON 상태" if self.hold_w is not None else ""))
             elif c in ("status", "s"):
                 self.status()
             elif c == "log":
@@ -585,12 +607,28 @@ class Sim:
             if self.mode == "TAKEOFF" and f >= 1.0:
                 self.mode = "HOVER"
                 print(f"[{t:7.2f}] 호버 진입 (고도 {self.args.alt} m)")
+            if self.mode == "LAND" and self.dob_on and pos[2] < self.ground_z + 0.20:
+                self.dob_on = False
+                self.obs.reset()
+                print(f"[{t:7.2f}] 접지 임박 — DoB 해제")
             if self.mode == "LAND" and pos[2] < self.ground_z + 0.03 and abs(vel[2]) < 0.15:
                 self.armed = False
                 self.mode = "DONE"
                 print(f"[{t:7.2f}] 접지. 시뮬레이션 종료")
         else:
             z_ref = self.args.alt if self.mode == "HOVER" else self.ground_z
+        if self.orbit is not None and self.mode == "HOVER":
+            t0, R, T, pl, c0 = self.orbit
+            th = 2 * math.pi * (t - t0) / T
+            dx, dy, dz = 0.0, 0.0, 0.0
+            if pl == "xy":
+                dx, dy = R * math.sin(th), R * (1 - math.cos(th))
+            elif pl == "xz":
+                dx, dz = R * math.sin(th), R * (1 - math.cos(th))
+            elif pl == "yz":
+                dy, dz = R * math.sin(th), R * (1 - math.cos(th))
+            self.target[0], self.target[1] = c0[0] + dx, c0[1] + dy
+            z_ref = c0[2] + dz
         ref = np.array([self.target[0], self.target[1], z_ref])
 
         # 무게중심 추종 (팔이 움직이면 CoM 이 실시간으로 변한다)

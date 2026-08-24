@@ -60,7 +60,7 @@ def main():
     p.add_argument("--kp", type=float, default=80.0, help="팔 관절 위치 게인")
     p.add_argument("--joint-damping", type=float, default=2.0,
                    help="팔 관절 damping (원본 0.3). 낮으면 진자 모드가 자세제어와 커플링됨")
-    p.add_argument("--j2-min", type=float, default=5.0,
+    p.add_argument("--j2-min", type=float, default=1.0,
                    help="joint2 하한 [deg]. 팔꿈치 뒤집힘/완전신전(특이점) 방지")
     p.add_argument("--joint-armature", type=float, default=0.02,
                    help="팔 관절 armature (반사 관성)")
@@ -231,7 +231,7 @@ def main():
             if j.get("name") in ("arm_joint2", "joint2") and j.get("range"):
                 r = [float(x) for x in j.get("range").split()]
                 j.set("range", f"{max(r[0], j2lo):.6f} {r[1]:.6f}")
-    for jn, lim in ([] if args.rigid else [("arm_joint1", (0.0, 1.5708)), ("arm_joint2", (-1.5708, 1.5708)),
+    for jn, lim in ([] if args.rigid else [("arm_joint1", (0.0, 1.5708)), ("arm_joint2", (j2lo, 1.5708)),
                     ("arm_joint3", (-1.5708, 1.5708)), ("arm_joint4", (-3.15, 3.15))]):
         e = ET.SubElement(act, "position")
         e.set("name", f"act_{jn}")
